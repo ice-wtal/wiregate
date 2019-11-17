@@ -1,0 +1,56 @@
+# Plugin zum darstellen des aktellen Stromverbrauches
+# V1.0 2015-05-22
+
+# Zyklischen Aufruf abschalten
+$plugin_info{$plugname.'_cycle'} = 0;
+
+# Adresse abonieren
+$plugin_subscribe{'0/5/6'}{$plugname}=1; # m/s
+
+# Umrechnen
+my $ms = knx_read( '0/5/6', 0, '9.005' );
+my $kmh = $ms * 60 * 60 / 1000;
+# DPT und RRD aktualisieren
+knx_write( '0/5/5', $kmh, '9.028' );
+update_rrd("Wind_geschwindigkeit", "", $kmh);
+
+my $beaufort = 0;
+if ( $ms > 0.2 ) {
+	$beaufort = 1;
+}
+if ( $ms > 1.5 ) {
+	$beaufort = 2;
+}
+if ( $ms > 3.3 ) {
+	$beaufort = 3;
+}
+if ( $ms > 5.4 ) {
+	$beaufort = 4;
+}
+if ( $ms > 7.9 ) {
+	$beaufort = 5;
+}
+if ( $ms > 10.7 ) {
+	$beaufort = 6;
+}
+if ( $ms > 13.8 ) {
+	$beaufort = 7;
+}
+if ( $ms > 17.1 ) {
+	$beaufort = 8;
+}
+if ( $ms > 20.7 ) {
+	$beaufort = 9;
+}
+if ( $ms > 24.4 ) {
+	$beaufort = 10;
+}
+if ( $ms > 28.4 ) {
+	$beaufort = 11;
+}
+if ( $ms > 32.6 ) {
+	$beaufort = 12;
+}
+knx_write( '0/5/7', $beaufort, '5.010' );
+
+return;
