@@ -1,0 +1,193 @@
+# Plugin für:
+# - Umwälzpumpe Ofen
+# - Brennersteuerung (Teleswitch)
+# - Thermometer Großes Badezimmer
+# - Lampe Speicher über 60°C
+# - Sommer- / Winterbetrieb
+# - schreibt Solarertrag in db
+
+# V0.5 2018-03-27
+# Max. Speichertemperatur für die Füllstandberechnung fest auf 90° eingestellt
+# In der Uebergangszeit ist der Füllstand von 60% etwas irreführend
+
+# V0.4 2017-09-15
+# An- und Abwesend wurde auf Scene umgestellt
+
+# V0.3 2017-05-18
+# Die max. Speichertemperatur wird vom eBus gelesen und der Füllstand damit errechnet
+
+# V0.2 2015-02-21
+# Der Speicherfüllstand wird in % errechnet
+# Hz Brenner wird abhängig von einigen Parametern ein-/ausgeschaltet
+# 01.06.2015 Schaltet Ofenpumpe ein wenn Ofen > 45 Grad oder Ofen > Speicher unten
+# 29.1.2015 Erweiterung um mittlere Temperatur Gr. Bad
+# 26.2.2015 erweitert um täglich Solarertrag in db schreiben
+# 21.2.2015 erweitert um die Zirkulationspumpensteuerung - verbessern nach Test!!
+# 22.05.2014 Zikulationspumpensteuerung separiert
+
+# HTTs einbeziehen > Idee
+# sobald ZirkuPumpe ein > HTTs einschalten und 60 min. laufen lassen
+
+# Speicher läuft max. x Grad, 2018-03-27 fest auf 90° eingestellt
+#my $speicherMax = knx_read("3/1/90",0,"9");
+my $speicherMax = 90;
+
+# Eigenen Aufruf-Zyklus setzen (60 = 60 sec.)
+$plugin_info{$plugname.'_cycle'} = '60';
+
+# Datum und Zeit auswerten
+use Time::Local;
+my $sec; #Sekunde
+my $min; # Minute
+my $hour; #Stunde
+my $mday; #Monatstag
+my $mon; #Monatsnummer
+my $year; #Jahr
+my $wday; #Wochentag 0-6
+my $yday; #Tag ab 01.01.xxxx
+my $isdst;
+($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+$year += 1900;
+$mon += 1;
+
+# Speichertemperaturen
+my $speicherOben = knx_read("3/1/100",0,"9.001");
+my $speicherMitteOben = knx_read("3/1/101",0,"9.001");
+my $speicherMitteUnten = knx_read("3/1/102",0,"9.001");
+my $speicherUnten = knx_read("3/1/103",0,"9.001");
+my $speicherMittel = ( $speicherOben + $speicherMitteOben + $speicherMitteUnten + $speicherUnten ) / 4;
+# Prozentualer Füllstand: x Grad = 100%, 30 Grad = 0%
+my $fuellstand = 100 / ( $speicherMax - 30 ) * ( $speicherMittel - 30 );
+if ( $fuellstand < 0 ) {
+	$fuellstand = 0;
+}
+knx_write("3/1/104", $fuellstand, "5.001");
+
+# Umwälzpumpe Ofen ein
+my $ofenEin = 1;
+my $grad = knx_read("3/0/40",0,"9.001");
+# wenn der über 45 Grad hat und wärmer als der Speicher unten ist
+if ( $grad > 45 and $grad > $speicherUnten ) {
+	$plugin_info{$plugname.'_ofenEin'} = 1;
+} else {
+	$ofenEin = 0;
+}
+# 26.1.19: Sensor defekt > manuell schalten!
+#knx_write("3/0/41", $ofenEin, "1.001"); # Umwälzpumpe Ofen ein/aus
+
+# Brennersteuerung
+# 1. Warmwasser: Ist an wenn Speicher oben unter Warmwassersoll + x°K
+# 2. Grundsätzlich: Ofen ein oder abwesend -> Warmwasser aus
+my $wwSwitch = 0;
+
+# Scene Anwesend = 0, Abwesend = 1, Nacht = 2
+my $scene = knx_read("0/2/0", 0, "17.001");
+
+my $wwTemperatur = knx_read("3/0/35",0,"13"); # Soll Warmwasser
+if ( $wwTemperatur == "" ) {
+	$wwTemperatur = 45; # Soll Warmwasser - kommt nicht vom eBus!!
+}
+my $anwesend = 0;
+$anwesend = ( $scene != 1 );
+my $gast = knx_read("4/4/40",0,"1");
+my $kind1 = knx_read("4/4/41",0,"1");
+my $kind2 = knx_read("4/4/42",0,"1");
+
+# Die Werte vom ebus kommen nicht zuverlässig regelmäßig (kommt öfter eine 0)
+# eine 0 soll deshalb erst beim 30ten mal akzeptiert werden
+if ( $wwTemperatur == 0 ) {
+	if ( $plugin_info{$plugname.'_lastWWerror'} < 30 ) {
+		$plugin_info{$plugname.'_lastWWerror'} += 1;
+		$wwTemperatur = $plugin_info{$plugname.'_lastWWtemp'};
+	}
+} else {
+	$plugin_info{$plugname.'_lastWWtemp'} = $wwTemperatur;
+	$plugin_info{$plugname.'_lastWWerror'} = 0;
+}
+
+# Logik Warmwasser
+if ( $speicherOben < ($wwTemperatur+2+$kind1+$kind2+$gast) ) {
+	$wwSwitch = 1;
+}
+# Ofen ein, schaltet Warmwasser in jedem Fall aus!
+if ( $ofenEin ) {
+	$wwSwitch = 0;
+}
+# wenn keiner zu Hause ist, ist Warmwasser immer aus
+if ( !$anwesend ) {
+	$wwSwitch = 0;
+}
+knx_write("3/0/101", $wwSwitch, "1.001"); # Teleswitch ein/aus schreiben
+
+# Temperatur Gr. Bad wird durch warmen Schornstein verfälscht
+# Mittelwertberechnung mit Badewannensensor
+my $wanne_overdrive = 2;  # Überbewertung des Badewannensensors, Anfang: 1 = keine
+my $wanne_temp = knx_read("3/1/9",0,"9.001");
+my $tuer_temp = knx_read("3/1/8",0,"9.001");
+my $mittel_temp = 22;
+
+if ( $wanne_temp > 23 ) { # wenn jemand in der Badewanne ist, nur Türsensor nutzen
+  $mittel_temp = $tuer_temp;
+} else {
+  $mittel_temp = ( ( $wanne_overdrive * $wanne_temp ) + $tuer_temp ) / ( $wanne_overdrive + 1 );
+}
+knx_write("3/1/10", $mittel_temp, "9.001");
+
+# Wenn Speichermittelwert > 60° oder
+# Temperatur im Ez über 22.5, Lampe im Wz ein
+my $temp_ez = knx_read("3/1/2",0,"9.001");
+if ( $fuellstand > 60 || $temp_ez > 22.5 ) {
+	knx_write("3/1/105", 1, "1.001");
+} else {
+	knx_write("3/1/105", 0, "1.001");
+}
+
+# Zirkulationspumpe an Wochentagen einmal täglich einschalten
+# läuft seit April 2019 per Präsenzmelder
+#if ( $hour == 6 && $min == 0 && $wday > 0 && $wday < 6) {
+#	knx_write("3/0/37", 1, "1.001");
+#}
+
+# wenn Außentemp. Nord > 16°C = Sommerbetrieb (1)
+my $temp_nord = knx_read("0/5/1",0,"9.001");
+if ( $temp_nord > 16 ) {
+	knx_write("3/0/10", 1, "1.001");
+} else {
+	knx_write("3/0/10", 0, "1.001");
+}
+
+# Solarertrag in db schreiben
+my $sol_ertrag = knx_read("3/0/30", 0, "13.013");
+my $sol2db = $plugin_info{$plugname.'_sol2db'};
+my $ofenEin = $plugin_info{$plugname.'_ofenEin'};
+if ( $ofenEin != 1 ) {
+	$ofenEin = 0;
+}
+
+if ( $sol2db != $mday and $hour == 23 and ( $sol_ertrag > 0 || $ofenEin > 0 ) ) {
+	write_db( "INSERT INTO solar (kwh, ofen) VALUES ($sol_ertrag, $ofenEin);" );
+	$plugin_info{$plugname.'_sol2db'} = $mday;
+	$plugin_info{$plugname.'_ofenEin'} = 0;
+}
+
+# sub zum schreiben in db
+sub write_db {
+	my ($sql_query) = @_;
+	# zugangsdaten mysql Server
+	my $db_host = 'hp-gen8'; # access data for MySQL-database 
+	my $db_name = 'wiregate';
+	my $db_user = 'wiregate';
+	my $db_password = 'wiregate';
+
+	use DBI; 
+	# Datenbank Verbindung aufbauen
+	my $db_handle = DBI->connect("DBI:mysql:$db_name;host=$db_host", $db_user, 
+	  $db_password, { RaiseError => 1 } );
+  
+	$db_handle->do($sql_query);
+
+	# db Verbindung abbauen
+	$db_handle->disconnect();
+}
+
+return "WW soll " . $wwTemperatur . ",Teleswitch " . $wwSwitch . ", Anwesend " . $anwesend . ", Scene " . $scene;
