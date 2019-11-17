@@ -1,0 +1,205 @@
+# Wallbox Plugin zum automatischem einstellen der EV Ladestärke
+# V1.0 2019-02-27
+# Komplett neu geschrieben für Nutzung mit SDM630
+
+# V0.5 2019-01-16
+# Ladestart abhängig vom Export der letzten Tage
+
+# V0.4 2019-01-11
+# EV wird immer auf mind. SOC geladen abhängig vom PV Ertrag der letzten 5 Tage
+
+# V0.3 2018-04-10
+# auf Ampere statt Watt umgestellt
+
+# V0.2 2018-04-03
+# Ladestromstärke wird abhängig vom PV-Ertrag eingestellt
+
+# V0.1 2018-03-31
+
+# Zyklischen Aufruf auf x Sekunden (10 Sek.)
+$plugin_info{$plugname.'_cycle'} = 10;
+# Sofortiger Aufruf beim Ändern des Lademodus Rechts
+$plugin_subscribe{'4/6/12'}{$plugname} = 1;
+
+# Datum und Zeit auswerten
+use Time::Local;
+#Hier wird ein Array angelegt, um die Wochentagsnummer von localtime zu übersetzen
+my @Wochentag = ('sonntag', 'montag', 'dienstag', 'mittwoch', 'donnerstag', 'freitag', 'samstag');
+my $sec; #Sekunde
+my $min; # Minute
+my $hour; #Stunde
+my $mday; #Monatstag
+my $mon; #Monatsnummer
+my $year; #Jahr
+my $wday; #Wochentag 0-6
+my $yday; #Tag ab 01.01.xxxx
+my $isdst;
+($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+$year += 1900;
+$mon += 1;
+
+# Variablen setzen / holen
+my $ladeModusRechts = knx_read("4/6/12", 0, "17.001");
+wbLEDstatus( "r", $ladeModusRechts ); # r für rechte Seite
+
+my $settingMvoltRechts = knx_read("4/6/10", 0, "9.020"); # Aktuell eingestellter Wert
+my $currentMvoltRechts = knx_read("4/6/30", 0, "9.020"); # Aktuell vorhandener Wert
+my $diffMvoltRechts = $settingMvoltRechts - $currentMvoltRechts;
+my $statusText = "aus";
+my $statusAdresse = "4/6/5"; # Adresse für Statustext
+my $wattAktuell = knx_read( '4/0/14', 0, '14' ); # Aktueller Verbrauch / Einspeisung
+my $wattRechts = knx_read( '4/0/65', 0, '13.010' ); # lade aktuell mit x Watt
+my $ladeStart = -200; # ab hier wird geladen > demnächst abhängig vom SOC
+my $minCharge = $plugin_info{$plugname.'_minCharge'};
+
+my $ampere = knx_read( '4/0/66', 0, '14.019' );
+my $minAmpere = 5.5;
+my $volt = knx_read( '4/0/50', 0, '14.027' );
+
+# wie viel wattAktuell / Ampere hätte ich wenn ich nicht lade?
+my $wattBereinigt = $wattAktuell - $wattRechts;
+my $ampereBereinigt = $wattBereinigt / $volt;
+
+# mV zu A scheint nicht fest zu sein! Immer nach A ausrichten...
+
+# nur wenn kein Fahrzeug / voll oder Modewechsel
+my $setMvolt = 5000; # aus
+
+if ( $ladeModusRechts == 2 ) { # volle Leistung
+	$setMvolt = 0;
+} elsif ( $ladeModusRechts == 1 ) { # min. laden
+	$setMvolt = findMinCharge();
+} elsif ( $ladeModusRechts == 0 ) { # PV laden
+	if ( $wattBereinigt < $ladeStart || ( $wattBereinigt < ( $ladeStart - 200 ) && $wattAktuell > 0 ) ) { # Hysterese
+		if ( ( $ampereBereinigt * -1 ) < $minAmpere ) { # einpendeln auf minAmpere
+			# minAmpere suchen
+#			my $change = 2;
+			my $change = ( $minAmpere - $ampere ) * 4;
+#			if ( ( $minAmpere - $ampere ) > 4 ) {
+#				$change = 50;
+#			}
+#			if ( $settingMvoltRechts < 3700 || $settingMvoltRechts > 4200 ) {
+				# Fehler, Auto voll oder nicht angeschlossen
+#			if ( $ampere < $minAmpere ) {
+#				$setMvolt = $minCharge - $change;
+#			} elsif ( $ampere > $minAmpere ) {
+#				$setMvolt = $minCharge + $change;
+#			}
+			$setMvolt = $minCharge - $change;
+
+			$minCharge = $setMvolt;
+		} else {
+			$setMvolt = $settingMvoltRechts + ( ( $wattAktuell - 20 ) / 10 ); # Abhängig von wattBereinigt
+		}
+	}
+}
+
+# minCharge nur hinterlegen, wenn zwischen 3700 und 4200
+if ( $minCharge > 3700 && $minCharge < 4300 ) {
+	$plugin_info{$plugname.'_minCharge'} = $minCharge;
+}
+#$plugin_info{$plugname.'_minCharge'} = 3900;
+
+if ( $setMvolt < 3600 && $ampere == 0 ) {
+	# Auto ist voll oder nicht angeschlossen
+	$setMvolt = 3500;
+	$statusText = "kein EV";
+}
+
+# Wallbox neue Einstellung setzen
+knx_write("4/6/10", $setMvolt, "9.020");
+
+# Statusanzeige
+my $aktA = knx_read( '4/0/66', 0, '14.019' );
+$aktA = sprintf "%.1f", $aktA;
+if ( $aktA > 0 ) {
+	$statusText = "Lade mit " . $aktA . "A";
+}
+knx_write( $statusAdresse, $statusText, "16");
+
+# bis hierher geprüft und aktualisiert...
+
+# Variablen setzen / holen
+#my $avgErtrag = $plugin_info{'stromverbrauch_avgErtrag'}; # PV Ertrag Durchschnitt der letzten 5 Tage
+#my $avgExport = $plugin_info{'stromverbrauch_avgExport'}; # PV Export der letzten 5 Tage
+
+# Ladestart im Winter sobald Export vorhanden, im Sommer erst ab 1000 Watt Export
+#if ( $avgExport < 1000 ) {
+#	$ladeStart = $avgExport * -1;
+#}
+
+# sub / Unterfunktionen
+sub findMinCharge {
+#	Funktion wird nur aufgerufen wenn auch geladen werden soll!
+	my $subMinCharge = $plugin_info{$plugname.'_minCharge'};
+
+#	Minuten des Tages ausrechnen und speichern
+	my $tagesMinuten = $hour * 60 + $min;
+	my $tagesMinutenLast = $plugin_info{$plugname.'_tagesMinuten'};
+	
+#	alle x Minuten prüfen ob minCharge noch aktuell
+#		wenn settingMvoltRechts ungefähr minCharge und geladen wird
+#		setMvolt = settingMvoltRechts - 10
+	if ( $tagesMinutenLast > 1440 ) { # Tageswechsel abfangen
+		$plugin_info{$plugname.'_tagesMinuten'} = $tagesMinuten;
+	} elsif ( $tagesMinutenLast < $tagesMinuten - 20 ) {
+		$subMinCharge = $settingMvoltRechts + 50;
+		$plugin_info{$plugname.'_tagesMinuten'} = $tagesMinuten;
+	}
+#	if ( $hour != $plugin_info{$plugname.'_hour'} ) {
+#		$subMinCharge = $settingMvoltRechts + 50;
+#		$plugin_info{$plugname.'_hour'} = $hour;
+#	}
+
+#	$wattRechts = 0 > lädt aber nicht
+#		Auto voll / nicht angeschlossen / unter minCharge
+#	$settingMvoltRechts - 10
+
+#	wenn settingMvoltRechts ungefähr minCharge und nicht geladen wird
+#		setMvolt = settingMvoltRechts - 10
+	if ( $subMinCharge > 4250 ) { # beim Einschalten verkürzt dies den Weg von 5000
+		$subMinCharge = 4250;
+	} elsif ( $subMinCharge < 100 ) { # Auto voll oder Fehler
+		$subMinCharge = 300;
+	} elsif ( $subMinCharge < ( $settingMvoltRechts + 20 ) && $subMinCharge > ( $settingMvoltRechts - 20 ) && $wattRechts == 0 ) {
+		$subMinCharge = $settingMvoltRechts - 30;
+	} elsif ( $plugin_info{$plugname.'_ampere'} != $ampere && $ampere < 4.5 ) {
+		# wenn nicht stabil geladen wird... läuft aber noch nicht stabil!!
+		$subMinCharge = $settingMvoltRechts - 20;
+	}
+
+#	ab 3600 sollte auf jeden Fall geladen werden
+#		sonst kein Auto angeschlossen oder voll
+	if ( $subMinCharge < 3600 && $ampere == 0 ) {
+		# Auto ist voll oder nicht angeschlossen
+#		$subMinCharge = 3500;
+	} else {
+		$plugin_info{$plugname.'_minCharge'} = $subMinCharge;
+	}
+	$plugin_info{$plugname.'_ampere'} = $ampere;
+#	$plugin_info{$plugname.'_minCharge'} = 4200;
+
+#	return $subMinCharge;
+	return 3900;
+}
+sub wbLEDstatus { # LEDs am Wahlschalter ein-/ausschalten
+	if ( @_[0] == "r" ) {
+		if ( @_[1] == 0 ) {
+			knx_write( "4/6/16", 1, "1.001");
+		} else {
+			knx_write( "4/6/16", 0, "1.001");
+		}
+		if ( @_[1] == 1 ) {
+			knx_write( "4/6/17", 1, "1.001");
+		} else {
+			knx_write( "4/6/17", 0, "1.001");
+		}
+		if ( @_[1] == 2 ) {
+			knx_write( "4/6/18", 1, "1.001");
+		} else {
+			knx_write( "4/6/18", 0, "1.001");
+		}
+	}
+}
+
+return "minCharge " . $minCharge . ", Status: " . $statusText . ", mV: " . $setMvolt . ", Bereinigte A " . $ampereBereinigt;
