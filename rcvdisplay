@@ -1,0 +1,41 @@
+# Raspi Cometvisu Display / Power schalten
+# V0.1 2018-01-07
+
+# Eigenen Aufruf-Zyklus auf 60 sek. setzen
+#$plugin_info{$plugname.'_cycle'} = 120;
+
+# Adresse subscriben, wenn geändert wird Script gestartet
+$plugin_subscribe{'0/2/0'}{$plugname}=1;
+$plugin_subscribe{'0/1/15'}{$plugname}=1;
+
+# Variablen
+my $scene = knx_read("0/2/0", 0, "17.001");
+my $praesenzDiele = knx_read("0/1/15", 0, "1.001");
+# Status Steckdose holen
+my $power = 1; # knx_read("0/1/15", 0, "1.001");
+
+use Net::Ping;
+my $host = "rcvdisplay";
+my $p = Net::Ping->new();
+my $ping_result = "$host is alive.\n" if $p->ping($host);
+$p->close();
+
+use strict;
+use LWP::Simple;
+my $displayon = 'http://rcvdisplay/rcvdisplay/?t=displayon';
+my $displayoff = 'http://rcvdisplay/rcvdisplay/?t=displayoff';
+my $poweroff = 'http://rcvdisplay/rcvdisplay/?t=poweroff';
+
+my $result = 0;
+
+if ( $praesenzDiele == "1" ) {
+	$result = get( $displayon );
+}
+if ( $praesenzDiele == "0" ) {
+	$result = get( $displayoff );
+}
+
+if ( $scene != "0" ) { # wenn Scene 3 -> herunterfahren
+	$result = get( $poweroff );
+}
+return "Scene " . $scene . ", Diele ein/aus " . $praesenzDiele . ", " . $ping_result;
